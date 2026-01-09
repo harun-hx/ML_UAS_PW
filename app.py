@@ -11,7 +11,10 @@ CORS(app)
 # CONFIGURATION
 # -----------------------------
 MODEL_ID = "harun-767/dog-breed-classifier"
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+
+# ✅ NEW ROUTER ENDPOINT (Required since api-inference is deprecated)
+API_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
+
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 headers = {
@@ -23,7 +26,10 @@ headers = {
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "message": "🐶 Dog Breed Relay is running"})
+    return jsonify({
+        "status": "ok",
+        "message": "🐶 Dog Breed Relay is running (Router API)"
+    })
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -42,8 +48,9 @@ def predict():
             "options": {"wait_for_model": True}
         }
 
-        # 2. Send to Hugging Face
-        print(f"🚀 Sending to HF: {API_URL}")
+        # ---------------------------------------------------------
+        # ✅ YOUR EXACT FINAL CODE BLOCK
+        # ---------------------------------------------------------
         response = requests.post(
             API_URL,
             headers=headers,
@@ -51,56 +58,49 @@ def predict():
             timeout=60
         )
 
-        # ---------------------------------------------------------
-        # ✅ YOUR FIX: Validate Response before Parsing
-        # ---------------------------------------------------------
         raw_text = response.text.strip()
-
-        # Check 1: Is it empty?
+        
         if not raw_text:
             return jsonify({
                 "error": "HF API Error",
-                "details": "Empty response from Hugging Face"
+                "details": "Empty response from Hugging Face (cold start or rate limit)"
             }), 502
 
-        # Check 2: Is it valid JSON?
         try:
             hf_predictions = response.json()
         except ValueError:
             print("HF NON-JSON RESPONSE:", raw_text[:500])
             return jsonify({
                 "error": "HF API Error",
-                "details": "Non-JSON response (Likely HTML error page)"
+                "details": "Non-JSON response from Hugging Face"
             }), 502
 
-        # Check 3: Is it an API error code?
         if response.status_code != 200:
             return jsonify({
                 "error": "HF API Error",
                 "details": hf_predictions
             }), response.status_code
-        
         # ---------------------------------------------------------
-        # END OF FIX - Now we process the good data
+        # END OF YOUR BLOCK
         # ---------------------------------------------------------
 
-        # Check for error key inside 200 OK (Rare edge case)
+        # 3. Handle "Soft" Errors (200 OK but contains error message)
         if isinstance(hf_predictions, dict) and "error" in hf_predictions:
             return jsonify({
                 "error": "HF Inference Error",
                 "details": hf_predictions["error"]
             }), 503
 
-        # Flatten list if needed (HF sometimes returns [[...]])
+        # 4. Standardize List Format (Handle [[...]] vs [...])
         if isinstance(hf_predictions, list) and len(hf_predictions) > 0 and isinstance(hf_predictions[0], list):
             hf_predictions = hf_predictions[0]
 
-        # Format Results (Clean Labels)
+        # 5. Format & Clean Results
         formatted_results = []
         for i, pred in enumerate(hf_predictions):
             raw_label = pred.get("label", "Unknown")
             
-            # Clean: "n0210-husky" -> "Husky"
+            # Clean Label: "n0210-husky" -> "Husky"
             clean_label = re.sub(r'^n\d+-', '', raw_label).replace('_', ' ').title()
             
             formatted_results.append({
