@@ -12,20 +12,17 @@ app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# 1. Load Model (Internal Loading)
+# 1. Load Model
 # -----------------------------
-# This works AFTER you complete Step 1 (Upload)
 MODEL_ID = "harun-767/dog-breed-classifier"
 
 print(f"Loading model: {MODEL_ID}...")
 try:
-    # We load directly from the Hub
     processor = ViTImageProcessor.from_pretrained(MODEL_ID)
     model = ViTForImageClassification.from_pretrained(MODEL_ID)
     print("✅ Dog Model loaded successfully!")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
-    print("Did you run the upload script to push './vit-dog-model' to Hugging Face?")
     model = None
 
 # -----------------------------
@@ -35,13 +32,13 @@ except Exception as e:
 def home():
     return jsonify({
         "status": "ok",
-        "message": "🐶 Dog Breed AI is running (Internal Inference)"
+        "message": "🐶 Dog Breed AI is running"
     })
 
 @app.route("/predict", methods=["POST"])
 def predict():
     if model is None:
-        return jsonify({"error": "Model not loaded. Check server logs."}), 500
+        return jsonify({"error": "Model not loaded."}), 500
 
     data = request.get_json(silent=True)
     if not data or "image" not in data:
@@ -50,16 +47,12 @@ def predict():
     try:
         # ---- 2. Process Base64 Image ----
         b64_string = data["image"]
-        
-        # Clean header
         b64_string = re.sub(r"^data:image/.+;base64,", "", b64_string)
 
-        # Fix padding
         missing_padding = len(b64_string) % 4
         if missing_padding:
             b64_string += "=" * (4 - missing_padding)
 
-        # Decode
         image_bytes = base64.b64decode(b64_string)
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
@@ -76,26 +69,36 @@ def predict():
         # Get Top 3 results
         top_k = torch.topk(probs, 3)
         results = []
-        for score, idx in zip(top_k.values, top_k.indices):
+        
+        # Enumerate gives us the index 'i' to find the top 1
+        for i, (score, idx) in enumerate(zip(top_k.values, top_k.indices)):
+            raw_label = model.config.id2label[idx.item()]
+            
+            # --- CLEANING LOGIC ---
+            # 1. Remove the "n12345-" prefix using Regex
+            #    ^n\d+- matches "n" followed by digits and a dash at the start
+            clean_label = re.sub(r'^n\d+-', '', raw_label)
+            
+            # 2. Replace underscores with spaces and Title Case
+            #    "Labrador_retriever" -> "Labrador Retriever"
+            clean_label = clean_label.replace('_', ' ').title()
+
             results.append({
-                "label": model.config.id2label[idx.item()],
-                "confidence": round(score.item(), 4)
+                "label": clean_label,
+                "confidence": round(score.item(), 4),
+                # Add a flag for the frontend to know this is the winner
+                "is_best_match": (i == 0) 
             })
 
-        # Return format matching your frontend expectations
+        # Return SIMPLIFIED format
         return jsonify({
             "status": "success",
-            "top1": results[0],    # Frontend likely expects 'top1'
-            "top5": results,       # Sending top 3 as top5 list is fine
-            "predictions": results # Backup key
+            "predictions": results 
         })
 
     except Exception as e:
         print(f"Prediction Error: {e}")
-        return jsonify({
-            "error": "Internal server error",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
