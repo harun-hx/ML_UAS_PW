@@ -5,24 +5,30 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
+# Enable CORS for all domains
 CORS(app)
 
 # -----------------------------
 # CONFIGURATION
 # -----------------------------
 MODEL_ID = "harun-767/dog-breed-classifier"
-# We send the image to Hugging Face's API (The "External Brain")
+# Use the Standard Inference API
 API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
 
-# Optional: Uses your HF Token if set, otherwise tries anonymously
+# Setup Headers (Safe Token Handling)
 HF_TOKEN = os.environ.get("HF_TOKEN")
-headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+headers = {
+    "Authorization": f"Bearer {HF_TOKEN}",
+    "Content-Type": "application/json"
+} if HF_TOKEN else {
+    "Content-Type": "application/json"
+}
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "ok",
-        "message": "🐶 Dog Breed Relay is running (Lightweight)"
+        "message": "🐶 Dog Breed Relay is running (Safe Production Version)"
     })
 
 @app.route("/predict", methods=["POST"])
@@ -32,41 +38,51 @@ def predict():
         return jsonify({"error": "No image provided"}), 400
 
     try:
-        # 1. Prepare Base64 Image
+        # 1. Clean Base64 String
         b64_string = data["image"]
-        # Remove the header "data:image/jpeg;base64," if present
         if "base64," in b64_string:
             b64_string = b64_string.split("base64,")[1]
 
-        # 2. Send to Hugging Face API (No Torch, No RAM usage)
         payload = {
             "inputs": b64_string,
             "options": {"wait_for_model": True}
         }
-        
-        # Post to external API
-        response = requests.post(API_URL, headers=headers, json=payload)
-        
-        # 3. Handle HF Errors
+
+        # 2. Send to Hugging Face with TIMEOUT (Crucial Fix)
+        # 60s timeout handles the "Cold Start" case where model loads
+        response = requests.post(
+            API_URL, 
+            headers=headers, 
+            json=payload,
+            timeout=60 
+        )
+
+        hf_predictions = response.json()
+
+        # 3. Handle HF Specific Errors (Model Loading / Auth Error)
         if response.status_code != 200:
-            return jsonify({
-                "error": "HF API Error", 
-                "details": response.text
+             return jsonify({
+                "error": "HF API Error",
+                "details": hf_predictions
             }), response.status_code
 
-        # 4. Clean Up the Response
-        hf_predictions = response.json()
-        
-        # Handle cases where HF returns a list of lists
+        # If HF returns a dict with error (even with 200 OK sometimes)
+        if isinstance(hf_predictions, dict) and "error" in hf_predictions:
+            return jsonify({
+                "error": "HF Inference Error",
+                "details": hf_predictions["error"]
+            }), 503
+
+        # 4. Handle List Format (HF sometimes returns [[...]] or [...])
         if isinstance(hf_predictions, list) and len(hf_predictions) > 0 and isinstance(hf_predictions[0], list):
             hf_predictions = hf_predictions[0]
 
+        # 5. Format & Clean Results
         formatted_results = []
         for i, pred in enumerate(hf_predictions):
             raw_label = pred.get("label", "Unknown")
             
-            # --- CLEANING LOGIC (Same as before) ---
-            # Remove "n12345-" and replace "_" with space
+            # Clean Label: "n0210-husky" -> "Husky"
             clean_label = re.sub(r'^n\d+-', '', raw_label).replace('_', ' ').title()
             
             formatted_results.append({
@@ -80,6 +96,8 @@ def predict():
             "predictions": formatted_results
         })
 
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Model timed out (Is it waking up? Try again in 30s)"}), 504
     except Exception as e:
         print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
