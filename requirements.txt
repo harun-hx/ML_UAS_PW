@@ -1,6 +1,6 @@
+torch --index-url https://download.pytorch.org/whl/cpu
 flask
 flask-cors
 transformers
 pillow
 gunicorn
-torch --index-url https://download.pytorch.org/whl/cpu
