@@ -1,8 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-
 flask
 flask-cors
-transformers
-pillow
+requests
 gunicorn
-torch==2.9.1+cpu

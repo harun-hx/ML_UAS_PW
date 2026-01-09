@@ -1,103 +1,78 @@
 import os
 import re
-import base64
-import io
-import torch
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from transformers import ViTImageProcessor, ViTForImageClassification
-from PIL import Image
 
 app = Flask(__name__)
+# Allow CORS for all domains
 CORS(app)
 
-# -----------------------------
-# 1. Load Model
-# -----------------------------
+# CONFIGURATION
 MODEL_ID = "harun-767/dog-breed-classifier"
+# We send the image to Hugging Face's Public API
+API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
 
-print(f"Loading model: {MODEL_ID}...")
-try:
-    processor = ViTImageProcessor.from_pretrained(MODEL_ID)
-    model = ViTForImageClassification.from_pretrained(MODEL_ID)
-    print("✅ Dog Model loaded successfully!")
-except Exception as e:
-    print(f"❌ Error loading model: {e}")
-    model = None
+# Optional: Add your HF Token if you have one in Railway Variables (HF_TOKEN)
+# If not, it will try anonymously (might be rate limited)
+HF_TOKEN = os.environ.get("HF_TOKEN")
+headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
-# -----------------------------
-# Routes
-# -----------------------------
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({
-        "status": "ok",
-        "message": "🐶 Dog Breed AI is running"
-    })
+    return jsonify({"status": "ok", "message": "🐶 Dog Breed Relay is running"})
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    if model is None:
-        return jsonify({"error": "Model not loaded."}), 500
-
     data = request.get_json(silent=True)
     if not data or "image" not in data:
         return jsonify({"error": "No image provided"}), 400
 
     try:
-        # ---- 2. Process Base64 Image ----
+        # 1. Prepare Image Data
         b64_string = data["image"]
-        b64_string = re.sub(r"^data:image/.+;base64,", "", b64_string)
+        # Remove the header "data:image/jpeg;base64," if it exists
+        if "base64," in b64_string:
+            b64_string = b64_string.split("base64,")[1]
 
-        missing_padding = len(b64_string) % 4
-        if missing_padding:
-            b64_string += "=" * (4 - missing_padding)
-
-        image_bytes = base64.b64decode(b64_string)
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-        # ---- 3. AI Prediction ----
-        inputs = processor(images=image, return_tensors="pt")
+        # 2. Send to Hugging Face (The "Router" logic)
+        payload = {
+            "inputs": b64_string,
+            "options": {"wait_for_model": True}
+        }
         
-        with torch.no_grad():
-            outputs = model(**inputs)
-
-        # Calculate probabilities
-        logits = outputs.logits
-        probs = torch.softmax(logits, dim=1)[0]
-
-        # Get Top 3 results
-        top_k = torch.topk(probs, 3)
-        results = []
+        response = requests.post(API_URL, headers=headers, json=payload)
         
-        # Enumerate gives us the index 'i' to find the top 1
-        for i, (score, idx) in enumerate(zip(top_k.values, top_k.indices)):
-            raw_label = model.config.id2label[idx.item()]
-            
-            # --- CLEANING LOGIC ---
-            # 1. Remove the "n12345-" prefix using Regex
-            #    ^n\d+- matches "n" followed by digits and a dash at the start
-            clean_label = re.sub(r'^n\d+-', '', raw_label)
-            
-            # 2. Replace underscores with spaces and Title Case
-            #    "Labrador_retriever" -> "Labrador Retriever"
-            clean_label = clean_label.replace('_', ' ').title()
+        # 3. Check for Errors from HF
+        if response.status_code != 200:
+            return jsonify({"error": "HF API Error", "details": response.text}), response.status_code
 
-            results.append({
+        # 4. Format the Output
+        hf_predictions = response.json()
+        
+        # Handle different response formats (sometimes list of lists)
+        if isinstance(hf_predictions, list) and len(hf_predictions) > 0 and isinstance(hf_predictions[0], list):
+            hf_predictions = hf_predictions[0]
+
+        formatted_results = []
+        for i, pred in enumerate(hf_predictions):
+            raw_label = pred.get("label", "Unknown")
+            # Clean: "n0210-husky" -> "Husky"
+            clean_label = re.sub(r'^n\d+-', '', raw_label).replace('_', ' ').title()
+            
+            formatted_results.append({
                 "label": clean_label,
-                "confidence": round(score.item(), 4),
-                # Add a flag for the frontend to know this is the winner
-                "is_best_match": (i == 0) 
+                "confidence": round(pred.get("score", 0), 4),
+                "is_best_match": (i == 0)
             })
 
-        # Return SIMPLIFIED format
         return jsonify({
             "status": "success",
-            "predictions": results 
+            "predictions": formatted_results
         })
 
     except Exception as e:
-        print(f"Prediction Error: {e}")
+        print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
