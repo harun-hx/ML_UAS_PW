@@ -9,18 +9,20 @@ app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# CONFIGURATION
+# 4️⃣ Correct & FINAL Flask Configuration
 # -----------------------------
 MODEL_ID = "harun-767/dog-breed-classifier"
-# Use the Standard Inference API
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+# Using the Router endpoint as requested
+API_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
 
-# Setup Headers (Safe Token Handling)
+# Token is MANDATORY for this endpoint configuration
 HF_TOKEN = os.environ.get("HF_TOKEN")
+
+if not HF_TOKEN:
+    print("⚠️ WARNING: HF_TOKEN is missing! The Router endpoint might fail.")
+
 headers = {
     "Authorization": f"Bearer {HF_TOKEN}",
-    "Content-Type": "application/json"
-} if HF_TOKEN else {
     "Content-Type": "application/json"
 }
 
@@ -28,7 +30,7 @@ headers = {
 def home():
     return jsonify({
         "status": "ok",
-        "message": "🐶 Dog Breed Relay is running (Safe Production Version)"
+        "message": "🐶 Dog Breed Relay is running (Router Endpoint)"
     })
 
 @app.route("/predict", methods=["POST"])
@@ -48,8 +50,8 @@ def predict():
             "options": {"wait_for_model": True}
         }
 
-        # 2. Send to Hugging Face with TIMEOUT (Crucial Fix)
-        # 60s timeout handles the "Cold Start" case where model loads
+        # 2. Send to Hugging Face Router
+        # We use a 60s timeout to allow for model cold-start
         response = requests.post(
             API_URL, 
             headers=headers, 
@@ -59,21 +61,22 @@ def predict():
 
         hf_predictions = response.json()
 
-        # 3. Handle HF Specific Errors (Model Loading / Auth Error)
+        # 3. Handle HF Specific Errors
         if response.status_code != 200:
+             # Pass the exact error from HF back to frontend
              return jsonify({
                 "error": "HF API Error",
                 "details": hf_predictions
             }), response.status_code
 
-        # If HF returns a dict with error (even with 200 OK sometimes)
+        # Check for specific dictionary errors (e.g., "Model is loading")
         if isinstance(hf_predictions, dict) and "error" in hf_predictions:
             return jsonify({
                 "error": "HF Inference Error",
                 "details": hf_predictions["error"]
             }), 503
 
-        # 4. Handle List Format (HF sometimes returns [[...]] or [...])
+        # 4. Handle List Format (Standardize output)
         if isinstance(hf_predictions, list) and len(hf_predictions) > 0 and isinstance(hf_predictions[0], list):
             hf_predictions = hf_predictions[0]
 
@@ -97,7 +100,7 @@ def predict():
         })
 
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Model timed out (Is it waking up? Try again in 30s)"}), 504
+        return jsonify({"error": "Model timed out (Cold Start). Please try again in 30s."}), 504
     except Exception as e:
         print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
