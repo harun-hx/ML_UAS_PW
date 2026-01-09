@@ -1,8 +1,11 @@
 import os
 import re
-import requests
+import base64
+import io
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from huggingface_hub import InferenceClient
+from PIL import Image
 
 app = Flask(__name__)
 CORS(app)
@@ -11,24 +14,17 @@ CORS(app)
 # CONFIGURATION
 # -----------------------------
 MODEL_ID = "harun-767/dog-breed-classifier"
-
-# ✅ NEW ROUTER ENDPOINT (Required since api-inference is deprecated)
-API_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
-
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-headers = {
-    "Authorization": f"Bearer {HF_TOKEN}",
-    "Content-Type": "application/json"
-} if HF_TOKEN else {
-    "Content-Type": "application/json"
-}
+# Initialize the Official Client
+# This handles the URL routing automatically (Router vs Legacy)
+client = InferenceClient(token=HF_TOKEN)
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "status": "ok",
-        "message": "🐶 Dog Breed Relay is running (Router API)"
+        "status": "ok", 
+        "message": "🐶 Dog Breed Relay is running (Official Client)"
     })
 
 @app.route("/predict", methods=["POST"])
@@ -43,69 +39,25 @@ def predict():
         if "base64," in b64_string:
             b64_string = b64_string.split("base64,")[1]
 
-        payload = {
-            "inputs": b64_string,
-            "options": {"wait_for_model": True}
-        }
+        # 2. Convert to Image Object (PIL)
+        image_bytes = base64.b64decode(b64_string)
+        image = Image.open(io.BytesIO(image_bytes))
 
-        # ---------------------------------------------------------
-        # ✅ YOUR EXACT FINAL CODE BLOCK
-        # ---------------------------------------------------------
-        response = requests.post(
-            API_URL,
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
+        # 3. AI Prediction via Official Client
+        # The client automatically handles the URL and Model Loading
+        predictions = client.image_classification(image, model=MODEL_ID)
 
-        raw_text = response.text.strip()
-        
-        if not raw_text:
-            return jsonify({
-                "error": "HF API Error",
-                "details": "Empty response from Hugging Face (cold start or rate limit)"
-            }), 502
-
-        try:
-            hf_predictions = response.json()
-        except ValueError:
-            print("HF NON-JSON RESPONSE:", raw_text[:500])
-            return jsonify({
-                "error": "HF API Error",
-                "details": "Non-JSON response from Hugging Face"
-            }), 502
-
-        if response.status_code != 200:
-            return jsonify({
-                "error": "HF API Error",
-                "details": hf_predictions
-            }), response.status_code
-        # ---------------------------------------------------------
-        # END OF YOUR BLOCK
-        # ---------------------------------------------------------
-
-        # 3. Handle "Soft" Errors (200 OK but contains error message)
-        if isinstance(hf_predictions, dict) and "error" in hf_predictions:
-            return jsonify({
-                "error": "HF Inference Error",
-                "details": hf_predictions["error"]
-            }), 503
-
-        # 4. Standardize List Format (Handle [[...]] vs [...])
-        if isinstance(hf_predictions, list) and len(hf_predictions) > 0 and isinstance(hf_predictions[0], list):
-            hf_predictions = hf_predictions[0]
-
-        # 5. Format & Clean Results
+        # 4. Format Results (The client returns a clean list of objects)
         formatted_results = []
-        for i, pred in enumerate(hf_predictions):
-            raw_label = pred.get("label", "Unknown")
+        for i, pred in enumerate(predictions):
+            raw_label = pred.label # Access object attribute directly
             
             # Clean Label: "n0210-husky" -> "Husky"
             clean_label = re.sub(r'^n\d+-', '', raw_label).replace('_', ' ').title()
             
             formatted_results.append({
                 "label": clean_label,
-                "confidence": round(pred.get("score", 0), 4),
+                "confidence": round(pred.score, 4), # Access score attribute
                 "is_best_match": (i == 0)
             })
 
@@ -114,11 +66,24 @@ def predict():
             "predictions": formatted_results
         })
 
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "Model timed out (Cold Start). Try again."}), 504
     except Exception as e:
-        print(f"Server Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        # Check for specific HF errors (Like model loading)
+        error_msg = str(e)
+        print(f"Server Error: {error_msg}")
+        
+        if "503" in error_msg or "loading" in error_msg.lower():
+             return jsonify({
+                "error": "Model Loading",
+                "details": "The AI is waking up. Please try again in 30 seconds."
+            }), 503
+            
+        if "404" in error_msg:
+             return jsonify({
+                "error": "Model Not Found",
+                "details": "Check if your model is Private or if the 'Inference Widget' is disabled on Hugging Face."
+            }), 404
+
+        return jsonify({"error": "Prediction Failed", "details": error_msg}), 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
