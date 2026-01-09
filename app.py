@@ -5,33 +5,25 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-# Enable CORS for all domains
 CORS(app)
 
 # -----------------------------
-# 4️⃣ Correct & FINAL Flask Configuration
+# CONFIGURATION
 # -----------------------------
 MODEL_ID = "harun-767/dog-breed-classifier"
-# Using the Router endpoint as requested
-API_URL = f"https://router.huggingface.co/hf-inference/models/{MODEL_ID}"
-
-# Token is MANDATORY for this endpoint configuration
+API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
 HF_TOKEN = os.environ.get("HF_TOKEN")
-
-if not HF_TOKEN:
-    print("⚠️ WARNING: HF_TOKEN is missing! The Router endpoint might fail.")
 
 headers = {
     "Authorization": f"Bearer {HF_TOKEN}",
+    "Content-Type": "application/json"
+} if HF_TOKEN else {
     "Content-Type": "application/json"
 }
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({
-        "status": "ok",
-        "message": "🐶 Dog Breed Relay is running (Router Endpoint)"
-    })
+    return jsonify({"status": "ok", "message": "🐶 Dog Breed Relay is running"})
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -50,42 +42,65 @@ def predict():
             "options": {"wait_for_model": True}
         }
 
-        # 2. Send to Hugging Face Router
-        # We use a 60s timeout to allow for model cold-start
+        # 2. Send to Hugging Face
+        print(f"🚀 Sending to HF: {API_URL}")
         response = requests.post(
-            API_URL, 
-            headers=headers, 
+            API_URL,
+            headers=headers,
             json=payload,
-            timeout=60 
+            timeout=60
         )
 
-        hf_predictions = response.json()
+        # ---------------------------------------------------------
+        # ✅ YOUR FIX: Validate Response before Parsing
+        # ---------------------------------------------------------
+        raw_text = response.text.strip()
 
-        # 3. Handle HF Specific Errors
+        # Check 1: Is it empty?
+        if not raw_text:
+            return jsonify({
+                "error": "HF API Error",
+                "details": "Empty response from Hugging Face"
+            }), 502
+
+        # Check 2: Is it valid JSON?
+        try:
+            hf_predictions = response.json()
+        except ValueError:
+            print("HF NON-JSON RESPONSE:", raw_text[:500])
+            return jsonify({
+                "error": "HF API Error",
+                "details": "Non-JSON response (Likely HTML error page)"
+            }), 502
+
+        # Check 3: Is it an API error code?
         if response.status_code != 200:
-             # Pass the exact error from HF back to frontend
-             return jsonify({
+            return jsonify({
                 "error": "HF API Error",
                 "details": hf_predictions
             }), response.status_code
+        
+        # ---------------------------------------------------------
+        # END OF FIX - Now we process the good data
+        # ---------------------------------------------------------
 
-        # Check for specific dictionary errors (e.g., "Model is loading")
+        # Check for error key inside 200 OK (Rare edge case)
         if isinstance(hf_predictions, dict) and "error" in hf_predictions:
             return jsonify({
                 "error": "HF Inference Error",
                 "details": hf_predictions["error"]
             }), 503
 
-        # 4. Handle List Format (Standardize output)
+        # Flatten list if needed (HF sometimes returns [[...]])
         if isinstance(hf_predictions, list) and len(hf_predictions) > 0 and isinstance(hf_predictions[0], list):
             hf_predictions = hf_predictions[0]
 
-        # 5. Format & Clean Results
+        # Format Results (Clean Labels)
         formatted_results = []
         for i, pred in enumerate(hf_predictions):
             raw_label = pred.get("label", "Unknown")
             
-            # Clean Label: "n0210-husky" -> "Husky"
+            # Clean: "n0210-husky" -> "Husky"
             clean_label = re.sub(r'^n\d+-', '', raw_label).replace('_', ' ').title()
             
             formatted_results.append({
@@ -100,7 +115,7 @@ def predict():
         })
 
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Model timed out (Cold Start). Please try again in 30s."}), 504
+        return jsonify({"error": "Model timed out (Cold Start). Try again."}), 504
     except Exception as e:
         print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
