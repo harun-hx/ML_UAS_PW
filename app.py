@@ -68,7 +68,7 @@ def predict():
         probs = torch.softmax(logits, dim=1)[0]
 
         # Get Top 3 results
-        top_k = torch.topk(probs, 3)
+        top_k = torch.topk(probs, 5)
         results = []
         for score, idx in zip(top_k.values, top_k.indices):
             results.append({
