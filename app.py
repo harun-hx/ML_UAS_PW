@@ -9,80 +9,83 @@ from transformers import ViTImageProcessor, ViTForImageClassification
 from PIL import Image
 
 app = Flask(__name__)
+# Enable CORS for all domains (Crucial for Vercel -> Render communication)
 CORS(app)
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
+# --- 1. Load Model ---
+# We use a relative path so it works both locally and on the cloud
 MODEL_PATH = "harun-767/dog-breed-classifier"
-DEVICE = torch.device("cpu")  # Force CPU to save memory
 
-# Load processor and model
-print(f"Loading model from {MODEL_PATH} on CPU...")
+print(f"Loading model from {MODEL_PATH}...")
 try:
+    # Removed subfolder="vit-horse-model" assuming standard Hugging Face structure.
+    # If your model is in a subfolder, add subfolder="your-folder-name" back here.
     processor = ViTImageProcessor.from_pretrained(MODEL_PATH)
     model = ViTForImageClassification.from_pretrained(MODEL_PATH)
-    model.to(DEVICE)
-    model.eval()
     print("✅ Model loaded successfully!")
-except Exception as e:
-    print(f"❌ Failed to load model: {e}")
+except OSError:
+    print("❌ Critical Error: Model files not found. Check your MODEL_PATH or subfolder configuration.")
+    # We don't exit here so the server still starts and you can see the error logs online
     model = None
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "ok", "message": "🐶 Dog Breed AI is running!"})
+    return "🐶 Dog Breed AI is Running!"
 
 @app.route("/predict", methods=["POST"])
 def predict():
     if model is None:
         return jsonify({"error": "Model not loaded on server."}), 500
 
-    data = request.get_json(silent=True)
+    data = request.get_json()
     if not data or "image" not in data:
         return jsonify({"error": "No image provided"}), 400
 
     try:
-        # --- Decode Base64 image ---
+        # --- 2. Process Base64 Image ---
         b64_string = data["image"]
-        if "base64," in b64_string:
-            b64_string = b64_string.split("base64,")[1]
+        
+        # Clean up the string (remove "data:image/png;base64," prefix)
+        b64_string = re.sub(r"^data:image/.+;base64,", "", b64_string)
 
-        # Fix padding
-        b64_string += "=" * ((4 - len(b64_string) % 4) % 4)
+        # Fix padding errors
+        missing_padding = len(b64_string) % 4
+        if missing_padding:
+            b64_string += "=" * (4 - missing_padding)
 
+        # Decode
         image_bytes = base64.b64decode(b64_string)
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
-        # --- Preprocess and predict ---
+        # --- 3. AI Prediction ---
         inputs = processor(images=image, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-
+        
         with torch.no_grad():
             outputs = model(**inputs)
 
-        probs = torch.softmax(outputs.logits, dim=1)[0]
+        # Calculate probabilities
+        logits = outputs.logits
+        probs = torch.softmax(logits, dim=1)[0]
 
-        # --- Top 3 predictions ---
-        top_k = torch.topk(probs, 5)
+        # Get Top 3 results
+        top_k = torch.topk(probs, 3)
         results = []
-        for i, (score, idx) in enumerate(zip(top_k.values, top_k.indices)):
-            raw_label = model.config.id2label[idx.item()]
-            clean_label = re.sub(r'^n\d+-', '', raw_label).replace('_', ' ').title()
+        for score, idx in zip(top_k.values, top_k.indices):
             results.append({
-                "label": clean_label,
-                "confidence": round(score.item(), 4),
-                "is_best_match": (i == 0)  # Only the first one is marked as best match
+                "label": model.config.id2label[idx.item()],
+                "confidence": round(score.item(), 4)
             })
 
-        return jsonify({"status": "success", "predictions": results})
+        return jsonify({
+            "status": "success",
+            "predictions": results
+        })
 
-    except (base64.binascii.Error, IOError) as img_err:
-        return jsonify({"error": "Invalid image", "details": str(img_err)}), 400
     except Exception as e:
-        print(f"Server Error: {e}")
-        return jsonify({"error": "Prediction Failed", "details": str(e)}), 500
+        print(f"Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    # Use the PORT environment variable for Render/Heroku, default to 5000 locally
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
